@@ -4,12 +4,14 @@ import { useState, useCallback } from 'react';
 
 interface FetchResult {
   images: string[];
+  title?: string;
   erro?: string;
 }
 
 export default function Home() {
   const [url, setUrl] = useState('');
   const [images, setImages] = useState<string[]>([]);
+  const [title, setTitle] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [downloadingAll, setDownloadingAll] = useState(false);
@@ -48,6 +50,7 @@ export default function Home() {
       }
 
       setImages(data.images);
+      setTitle(data.title || '');
     } catch {
       setError('Erro de conexao. Tente novamente.');
     } finally {
@@ -119,6 +122,7 @@ export default function Home() {
   const limpar = () => {
     setUrl('');
     setImages([]);
+    setTitle('');
     setError('');
   };
 
@@ -177,9 +181,12 @@ export default function Home() {
           <div>
             {/* Actions */}
             <div className="flex items-center justify-between mb-4">
-              <p className="text-gray-400 text-sm">
+              <div>
+                {title && <p className="text-white text-sm font-medium mb-1">{title}</p>}
+                <p className="text-gray-400 text-sm">
                 {images.length} imagem{images.length !== 1 ? 'ns' : ''} encontrada{images.length !== 1 ? 's' : ''}
-              </p>
+                </p>
+              </div>
               <div className="flex gap-2">
                 <button
                   onClick={baixarTodas}
