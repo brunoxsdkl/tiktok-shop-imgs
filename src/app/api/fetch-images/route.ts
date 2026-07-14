@@ -13,33 +13,14 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
-function extractJsonFromHtml(html: string): any[] {
-  const results: any[] = [];
-  const patterns = [
-    /<script[^>]*id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/,
-    /<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/,
-    /<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
-    /window\._ROUTER_DATA\s*=\s*({[\s\S]*?})\s*<\/script>/,
-    /<script[^>]*>\s*self\.__next_f\.push\s*\(\s*\[[\d,"]*"([\s\S]*?)"\]\s*\)\s*<\/script>/,
-  ];
-  for (const pat of patterns) {
-    const m = html.match(pat);
-    if (m) {
-      try { results.push(JSON.parse(m[1])); } catch {}
-    }
-  }
-  return results;
-}
-
 function deepFindImages(obj: any, depth = 0): string[] {
   const found: string[] = [];
-  if (depth > 10 || !obj) return found;
+  if (depth > 12 || !obj) return found;
   if (typeof obj === 'string') {
-    if (obj.match(/^https?:\/\//) && obj.match(/\.(jpg|jpeg|png|webp|avif)/i) && obj.includes('tiktok')) {
-      found.push(obj);
-    }
-    if (obj.match(/p\d+-sign-\w+\.tiktokcdn\.com/) || obj.match(/lf\d+-tiktok-common\.tiktokcdn/)) {
-      found.push(obj);
+    if (obj.match(/^https?:\/\//) && (obj.includes('tiktokcdn') || obj.includes('byteimg') || obj.includes('bytedance'))) {
+      if (obj.match(/\.(jpg|jpeg|png|webp|avif)/i) || obj.match(/\/~tplv|\/obj|\/spectrum|\/tos/)) {
+        found.push(obj);
+      }
     }
   } else if (Array.isArray(obj)) {
     for (const item of obj) found.push(...deepFindImages(item, depth + 1));
@@ -47,6 +28,30 @@ function deepFindImages(obj: any, depth = 0): string[] {
     for (const val of Object.values(obj)) found.push(...deepFindImages(val, depth + 1));
   }
   return found;
+}
+
+// Try multiple CORS proxies to bypass TikTok blocking
+async function fetchViaProxy(targetUrl: string): Promise<string | null> {
+  const proxies = [
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+    `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
+    `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(targetUrl)}`,
+  ];
+
+  for (const proxyUrl of proxies) {
+    try {
+      const res = await fetchWithTimeout(proxyUrl, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      }, 12000);
+      if (res.ok) {
+        const text = await res.text();
+        if (text.length > 500 && (text.includes('tiktok') || text.includes('video'))) {
+          return text;
+        }
+      }
+    } catch {}
+  }
+  return null;
 }
 
 export async function POST(req: NextRequest) {
@@ -61,122 +66,98 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ erro: 'URL nao parece ser do TikTok.' }, { status: 400 });
     }
 
-    // Extract video/product ID from URL
-    const videoMatch = url.match(/\/video\/(\d+)/);
-    const productMatch = url.match(/\/product\/([^/?]+)/) || url.match(/\/product\/(\d+)/);
-    const itemIdMatch = url.match(/item_id=(\d+)/);
-
-    const videoId = videoMatch?.[1];
-    const productId = productMatch?.[1] || itemIdMatch?.[1];
-
     let images: string[] = [];
 
-    // Strategy 1: Try oEmbed API (works for video URLs, returns thumbnail)
-    if (videoId) {
+    // 1) Try oEmbed first (never blocked)
+    const videoMatch = url.match(/\/video\/(\d+)/);
+    if (videoMatch) {
       try {
-        const oembedUrl = `https://www.tiktok.com/oembed?url=https://www.tiktok.com/video/${videoId}`;
+        const oembedUrl = `https://www.tiktok.com/oembed?url=https://www.tiktok.com/video/${videoMatch[1]}`;
         const oembedRes = await fetchWithTimeout(oembedUrl, {
           headers: { 'User-Agent': 'Mozilla/5.0' },
         }, 5000);
         if (oembedRes.ok) {
           const oembed = await oembedRes.json();
-          if (oembed.thumbnail_url) {
-            images.push(oembed.thumbnail_url);
-          }
+          if (oembed.thumbnail_url) images.push(oembed.thumbnail_url);
+          // oEmbed also returns author info, try to get more from thumbnail
         }
       } catch {}
     }
 
-    // Strategy 2: Fetch the HTML page with various approaches
-    const urls = [url];
-    if (videoId) urls.push(`https://www.tiktok.com/video/${videoId}`);
-    if (productId) urls.push(`https://shop.tiktok.com/product/${productId}`);
+    // 2) Try fetching via CORS proxies
+    if (images.length === 0) {
+      const tryUrls = [url];
+      if (videoMatch) tryUrls.push(`https://www.tiktok.com/video/${videoMatch[1]}`);
 
-    const userAgents = [
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-      'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
-    ];
-
-    for (const tryUrl of urls) {
-      if (images.length > 0) break;
-
-      for (const ua of userAgents) {
+      for (const tryUrl of tryUrls) {
         if (images.length > 0) break;
+        const html = await fetchViaProxy(tryUrl);
+        if (!html) continue;
 
-        try {
-          const res = await fetchWithTimeout(tryUrl, {
-            headers: {
-              'User-Agent': ua,
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-              'Accept-Language': 'en-US,en;q=0.9,pt-BR;q=0.8',
-              'Accept-Encoding': 'gzip, deflate, br',
-              'Cache-Control': 'no-cache',
-              'Sec-Fetch-Dest': 'document',
-              'Sec-Fetch-Mode': 'navigate',
-              'Sec-Fetch-Site': 'none',
-              'Sec-Ch-Ua': '"Chromium";v="131", "Not_A Brand";v="24"',
-              'Sec-Ch-Ua-Mobile': '?0',
-              'Sec-Ch-Ua-Platform': '"Windows"',
-            },
-          }, 10000);
+        // Extract from script JSON data
+        const jsonPatterns = [
+          /<script[^>]*id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/,
+          /<script[^>]*id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>([\s\S]*?)<\/script>/,
+          /<script[^>]*id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/,
+          /window\._ROUTER_DATA\s*=\s*({[\s\S]*?})\s*<\/script>/,
+        ];
 
-          if (!res.ok) continue;
-          const html = await res.text();
-          if (html.length < 500) continue;
+        for (const pat of jsonPatterns) {
+          const m = html.match(pat);
+          if (!m) continue;
+          try {
+            const data = JSON.parse(m[1]);
+            images.push(...deepFindImages(data));
+          } catch {}
+        }
 
-          // Extract from JSON in script tags
-          const jsonData = extractJsonFromHtml(html);
-          for (const data of jsonData) {
-            const found = deepFindImages(data);
-            images.push(...found);
+        // Regex fallback on raw HTML
+        if (images.length === 0) {
+          const imgPatterns = [
+            /https?:\/\/p\d+-sign-[^"'\s\\]+\.tiktokcdn\.com\/[^"'\s\\]+/g,
+            /https?:\/\/[^"'\s\\]*tiktokcdn\.com\/[^"'\s\\]+\.(jpg|jpeg|png|webp|avif)/gi,
+            /https?:\/\/[^"'\s\\]*byteimg\.com\/[^"'\s\\]+/gi,
+          ];
+          for (const pat of imgPatterns) {
+            const found = html.match(pat);
+            if (found) images.push(...found);
           }
+        }
 
-          // Fallback: regex on raw HTML
-          if (images.length === 0) {
-            const patterns = [
-              /https?:\/\/p\d+-sign-[^"'\s\\]+\.tiktokcdn\.com\/[^"'\s\\]+/g,
-              /https?:\/\/[^"'\s\\]*tiktokcdn\.com\/[^"'\s\\]+\.(jpg|jpeg|png|webp|avif)/gi,
-              /https?:\/\/[^"'\s\\]*\.tiktok\.com\/obj\/[^"'\s\\]+/g,
-            ];
-            for (const pat of patterns) {
-              const found = html.match(pat);
-              if (found) images.push(...found);
-            }
-          }
-
-          // og:image fallback
-          if (images.length === 0) {
-            const ogMatch = html.match(/content="(https?:\/\/[^"]*(?:tiktok|tiktokcdn)[^"]*)"[^>]*property="og:image"/i)
-              || html.match(/property="og:image"[^>]*content="(https?:\/\/[^"]*(?:tiktok|tiktokcdn)[^"]*)"/i);
-            if (ogMatch) images.push(ogMatch[1]);
-          }
-
-          // Any large image fallback
-          if (images.length === 0) {
-            const allImgs = html.match(/https?:\/\/[^"'\s\\]+\.(jpg|jpeg|png|webp|avif)/gi);
-            if (allImgs) {
-              images.push(...allImgs.filter(i => i.includes('tiktok') || i.includes('byteimg')));
-            }
-          }
-        } catch {}
+        // og:image
+        if (images.length === 0) {
+          const ogMatch = html.match(/property="og:image"[^>]*content="([^"]+)"/i)
+            || html.match(/content="([^"]+)"[^>]*property="og:image"/i);
+          if (ogMatch && ogMatch[1].includes('http')) images.push(ogMatch[1]);
+        }
       }
     }
 
-    // Deduplicate
-    images = [...new Set(images)];
+    // 3) If we got video thumbnail from oEmbed, try to find product images from the page
+    // For TikTok Shop product pages specifically
+    if (images.length > 0 && /\/product\//.test(url)) {
+      // Try to find more images from the product page via proxy
+      const html = await fetchViaProxy(url);
+      if (html) {
+        const allImgUrls = html.match(/https?:\/\/[^"'\s\\]+\.(jpg|jpeg|png|webp|avif)/gi) || [];
+        for (const img of allImgUrls) {
+          if ((img.includes('tiktokcdn') || img.includes('byteimg') || img.includes('bytedance'))
+              && !img.includes('icon') && !img.includes('logo') && !img.includes('avatar')) {
+            images.push(img);
+          }
+        }
+      }
+    }
 
-    // Filter junk
-    images = images.filter(img => {
+    // Deduplicate & clean
+    images = [...new Set(images)].filter(img => {
       const l = img.toLowerCase();
-      if (l.includes('/icon') || l.includes('/logo') || l.includes('/avatar') || l.includes('/emoji')) return false;
-      if (l.includes('favicon')) return false;
-      return true;
+      return !l.includes('/icon') && !l.includes('/logo') && !l.includes('/avatar') && !l.includes('/emoji') && !l.includes('favicon');
     });
 
     if (images.length === 0) {
       return NextResponse.json({
-        erro: 'Nao foi possivel buscar as imagens. O TikTok pode estar bloqueando acesso automatico. Tente copiar o link novamente diretamente do app/site.',
+        erro: 'Nao foi possivel buscar as imagens. O TikTok bloqueia acesso automatizado. Tente copiar o link novamente ou use outro link.',
       }, { status: 404 });
     }
 
