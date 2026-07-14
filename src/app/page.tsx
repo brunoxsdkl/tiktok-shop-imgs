@@ -35,6 +35,11 @@ async function fetchViaProxy(url: string, timeoutMs = 15000): Promise<string | n
 function extractImagesFromHtml(html: string): string[] {
   const images: string[] = [];
 
+  // Skip CAPTCHA pages entirely
+  if (html.includes('Security Check') || html.includes('captcha_container') || html.includes('captcha-init.js')) {
+    return [];
+  }
+
   // JSON script tags
   const jsonPatterns = [
     /<script[^>]*id="SIGI_STATE"[^>]*>([\s\S]*?)<\/script>/,
@@ -49,14 +54,23 @@ function extractImagesFromHtml(html: string): string[] {
     try {
       const data = JSON.parse(m[1]);
       const jsonStr = JSON.stringify(data);
-      const found = jsonStr.match(/https?:\/\/[^"'\s\\]+(?:tiktokcdn|ibyteimg|byteimg|bytedance)[^"'\s\\]+\.(?:jpg|jpeg|png|webp|avif)/gi);
+
+      // Find image URLs with tiktokcdn, ibyteimg, byteimg patterns
+      const found = jsonStr.match(/https?:\/\/[^"'\s\\]+(?:tiktokcdn|ibyteimg|byteimg|bytedance|tiktokcdn-eu)[^"'\s\\]+\.(?:jpg|jpeg|png|webp|avif)/gi);
       if (found) images.push(...found);
 
-      // Deep search
+      // Also look for /tos/ paths (TikTok object storage)
+      const tosFound = jsonStr.match(/https?:\/\/[^"'\s\\]+\/tos\/[^"'\s\\]+\.(?:jpg|jpeg|png|webp|avif)/gi);
+      if (tosFound) images.push(...tosFound);
+
+      // Deep search for image strings in product data
       const deepSearch = (obj: any, depth = 0): void => {
         if (depth > 10 || !obj) return;
-        if (typeof obj === 'string' && obj.match(/^https?:\/\//) && (obj.includes('tiktokcdn') || obj.includes('ibyteimg') || obj.includes('byteimg'))) {
-          if (obj.match(/\.(jpg|jpeg|png|webp|avif)/i) || obj.match(/\/tos|\/obj|\/spectrum/)) {
+        if (typeof obj === 'string' && obj.match(/^https?:\/\//)) {
+          const l = obj.toLowerCase();
+          if ((l.includes('tiktokcdn') || l.includes('ibyteimg') || l.includes('byteimg') || l.includes('/tos/'))
+              && (l.endsWith('.jpg') || l.endsWith('.jpeg') || l.endsWith('.png') || l.endsWith('.webp') || l.endsWith('.avif')
+                  || l.includes('.jpg?') || l.includes('.png?') || l.includes('.webp?'))) {
             images.push(obj);
           }
         } else if (Array.isArray(obj)) {
@@ -88,7 +102,8 @@ function extractImagesFromHtml(html: string): string[] {
 
   return [...new Set(images)].filter(img => {
     const l = img.toLowerCase();
-    return !l.includes('/icon') && !l.includes('/logo') && !l.includes('/avatar') && !l.includes('favicon');
+    return !l.includes('/icon') && !l.includes('/logo') && !l.includes('/avatar') && !l.includes('favicon')
+      && !l.endsWith('.js') && !l.endsWith('.css') && !l.endsWith('.apk');
   });
 }
 
