@@ -9,28 +9,28 @@ export async function GET(req: NextRequest) {
 
   try {
     const parsedUrl = new URL(src);
-    const allowedHosts = [
-      'p16-sign-sg.tiktokcdn.com',
-      'p30-sign-sg.tiktokcdn.com',
-      'p9-sign-sg.tiktokcdn.com',
-      'lf16-tiktok-common.tiktokcdn-us.com',
-      'www.tiktok.com',
-    ];
 
-    const isAllowed = allowedHosts.some(host => parsedUrl.hostname.endsWith(host)) ||
-      parsedUrl.hostname.includes('tiktokcdn') ||
-      parsedUrl.hostname.includes('tiktok.com');
+    const isAllowed = parsedUrl.hostname.includes('tiktokcdn') ||
+      parsedUrl.hostname.includes('tiktok.com') ||
+      parsedUrl.hostname.includes('byteimg') ||
+      parsedUrl.hostname.includes('bytedance');
 
     if (!isAllowed) {
       return NextResponse.json({ erro: 'Host nao permitido.' }, { status: 403 });
     }
 
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 15000);
+
     const res = await fetch(src, {
+      signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://www.tiktok.com/',
       },
     });
+
+    clearTimeout(timer);
 
     if (!res.ok) {
       return NextResponse.json({ erro: 'Falha ao buscar imagem.' }, { status: 502 });
